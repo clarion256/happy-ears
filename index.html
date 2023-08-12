@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Frequency Spectrum Analyzer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start; /* Top align elements */
+            height: 100vh;
+            margin: 0;
+        }
+
+        #leftContainer {
+            flex: 1;
+            text-align: center;
+            padding: 20px;
+        }
+
+        #rightContainer {
+            flex: 1;
+            padding: 20px;
+        }
+
+        h1 {
+            margin: 0;
+        }
+
+        h2 {
+            margin-top: 0;
+        }
+
+        canvas {
+            border: 1px solid #ccc;
+            display: block;
+            margin: 20px auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: center;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
+
+        #animationContainer {
+            width: 40px;
+            height: 40px;
+            background-color: #3498db;
+            border-radius: 50%;
+            animation: spin 2s linear infinite;
+            margin: 10px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        #startButton[disabled], #stopButton[disabled], #setThresholdButton[disabled], #thresholdInput[disabled] {
+            background-color: #e74c3c;
+            cursor: not-allowed;
+        }
+
+        #tableContainer {
+            max-height: 300px;
+            overflow-y: scroll;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+<body>
+    <div id="leftContainer">
+        <h1>Frequency Spectrum Analyzer</h1>
+        <canvas id="spectrogramCanvas" width="600" height="300"></canvas>
+        <button id="startButton">Start</button>
+        <button id="stopButton" disabled>Stop</button>
+        <div id="animationContainer"></div>
+    </div>
+    <div id="rightContainer">
+        <h2>Threshold Instances</h2>
+        <div>
+            <p>Average Decibel Level: <span id="averageDecibel">-</span></p>
+            <label for="thresholdInput">Set Threshold:</label>
+            <input type="number" id="thresholdInput" min="0" step="1" value="40">
+            <button id="setThresholdButton">Set</button>
+        </div>
+        <div id="tableContainer">
+            <table id="thresholdTable">
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Instance</th>
+                    <th>Decibel Level</th>
+                    <th>Sum Speaking Length (s)</th>
+                </tr>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let ALERT_THRESHOLD = 40; // Changed to 40 decibels
+        const SAMPLE_RATE = 44100; // Adjust as needed
+        const DECIBEL_SAMPLE_DURATION = 1; // 1 second
+        const DECIBEL_SAMPLE_SIZE = SAMPLE_RATE * DECIBEL_SAMPLE_DURATION;
+
+        let isAnalyzing = false;
+        let analyserInterval;
+        const decibelInstances = [];
+        const speakingLengths = {};
+
+        const constraints = { audio: true };
+        navigator.mediaDevices.getUserMedia(constraints)
+            .then(function (stream) {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                source.connect(analyser);
+
+                analyser.fftSize = 2048;
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+
+                const canvas = document.getElementById("spectrogramCanvas");
+                const canvasContext = canvas.getContext("2d");
+                const gradient = canvasContext.createLinearGradient(0, 0, 0, canvas.height);
+                gradient.addColorStop(1, "blue");
+                gradient.addColorStop(0.5, "green");
+                gradient.addColorStop(0, "red");
+
+                let instanceCount = 1;
+                let speakingStartTime = null;
+
+                function draw() {
+                    analyser.getByteFrequencyData(dataArray);
+                    canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+
+                    const barWidth = canvas.width / bufferLength;
+                    let x = 0;
+
+                    for (let i = 0; i < bufferLength; i++) {
+                        const barHeight = dataArray[i] * canvas.height / 256;
+                        canvasContext.fillStyle = gradient;
+                        canvasContext.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                        x += barWidth + 1;
+                    }
+
+                    const rms = Math.sqrt(dataArray.reduce((acc, val) => acc + val * val, 0) / bufferLength);
+                    const decibels = 20 * Math.log10(rms);
+
+                    if (decibels > ALERT_THRESHOLD && isAnalyzing) {
+                        if (!decibelInstances.includes(instanceCount)) {
+                            decibelInstances.push(decibels);
+
+                            if (speakingStartTime === null) {
+                                speakingStartTime = new Date().getTime();
+                            }
+
+                            instanceCount++;
+
+                            const averageDecibel = calculateAverageDecibel();
+                            document.getElementById("averageDecibel").textContent = averageDecibel.toFixed(2);
+                        }
+                    } else {
+                        if (speakingStartTime !== null) {
+                            const speakingEndTime = new Date().getTime();
+                            const speakingLength = (speakingEndTime - speakingStartTime) / 1000;
+
+                            speakingLengths[instanceCount - 1] = speakingLength;
+                            speakingStartTime = null;
+
+                            updateSpeakingLengthsTable();
+                        }
+                    }
+
+                    requestAnimationFrame(draw);
+                }
+
+                function calculateAverageDecibel() {
+                    if (decibelInstances.length === 0) {
+                        return 0;
+                    }
+                    return decibelInstances.reduce((acc, decibel) => acc + decibel, 0) / decibelInstances.length;
+                }
+
+                function updateSpeakingLengthsTable() {
+                    const table = document.getElementById("thresholdTable");
+
+                    let sumSpeakingLength = 0;
+                    let sumSpeakingInstances = 0;
+
+                    for (let i = 0; i < decibelInstances.length; i++) {
+                        const instance = i + 1;
+                        const speakingLength = speakingLengths[instance];
+
+                        if (speakingLength !== undefined) {
+                            sumSpeakingLength += speakingLength;
+                            sumSpeakingInstances++;
+
+                            if (sumSpeakingInstances === DECIBEL_SAMPLE_SIZE || i === decibelInstances.length - 1) {
+                                const newRow = table.insertRow(1); // Insert at the top
+                                const timestampCell = newRow.insertCell(0);
+                                const instanceCell = newRow.insertCell(1);
+                                const decibelCell = newRow.insertCell(2);
+                                const speakingLengthCell = newRow.insertCell(3);
+
+                                const timestamp = new Date().toLocaleString();
+                                timestampCell.textContent = timestamp;
+                                instanceCell.textContent = instance;
+                                decibelCell.textContent = (decibelInstances.slice(i - sumSpeakingInstances + 1, i + 1).reduce((acc, curr) => acc + curr) / sumSpeakingInstances).toFixed(2);
+                                speakingLengthCell.textContent = sumSpeakingLength.toFixed(2);
+
+                                sumSpeakingLength = 0; // Reset for the next sample duration
+                                sumSpeakingInstances = 0;
+                            }
+                        }
+                    }
+                }
+
+                document.getElementById("startButton").addEventListener("click", function () {
+                    if (!isAnalyzing) {
+                        isAnalyzing = true;
+                        analyserInterval = setInterval(draw, DECIBEL_SAMPLE_DURATION * 1000);
+                        document.getElementById("startButton").disabled = true;
+                        document.getElementById("stopButton").disabled = false;
+                        document.getElementById("setThresholdButton").disabled = true;
+                        document.getElementById("thresholdInput").disabled = true;
+                        document.getElementById("animationContainer").style.display = "block";
+                    }
+                });
+
+                document.getElementById("stopButton").addEventListener("click", function () {
+                    if (isAnalyzing) {
+                        isAnalyzing = false;
+                        clearInterval(analyserInterval);
+                        document.getElementById("startButton").disabled = false;
+                        document.getElementById("stopButton").disabled = true;
+                        document.getElementById("setThresholdButton").disabled = false;
+                        document.getElementById("thresholdInput").disabled = false;
+                        document.getElementById("animationContainer").style.display = "none";
+                    }
+                });
+
+                document.getElementById("setThresholdButton").addEventListener("click", function () {
+                    const thresholdInput = document.getElementById("thresholdInput");
+                    const newThreshold = parseInt(thresholdInput.value, 10);
+                    if (!isNaN(newThreshold)) {
+                        ALERT_THRESHOLD = newThreshold;
+                    }
+                });
+            })
+            .catch(function (error) {
+                console.error('Error accessing the microphone:', error);
+            });
+    </script>
+</body>
+</html>
